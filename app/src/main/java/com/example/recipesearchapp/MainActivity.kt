@@ -21,6 +21,7 @@ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.GET
@@ -40,15 +41,13 @@ data class MealsResponse(
 )
 
 // retrofit api service
-interface TheMealDBService {
+interface MealApi {
     @GET("search.php")
     suspend fun searchMeals(@Query("s") query: String): MealsResponse
 }
 
-
-
 // data access layer responsible for fetching recipe data
-class RecipeRemoteDataSource(private val api: TheMealDBService) {
+class RemoteSource(private val api: MealApi) {
     suspend fun searchRecipes(query: String): Result<List<Meal>> {
         return try {
             val response = api.searchMeals(query)
@@ -73,7 +72,7 @@ sealed class UiState {
 }
 
 // view model
-class RecipeViewModel : androidx.lifecycle.ViewModel() {
+class SearchViewModel : androidx.lifecycle.ViewModel() {
     private val _uiState = MutableStateFlow<UiState>(UiState.Idle)
     val uiState: StateFlow<UiState> = _uiState
 
@@ -81,18 +80,21 @@ class RecipeViewModel : androidx.lifecycle.ViewModel() {
         .add(KotlinJsonAdapterFactory())
         .build()
 
+    private val okHttpClient = OkHttpClient.Builder().build()
+
     private val retrofit = Retrofit.Builder()
         .baseUrl("https://www.themealdb.com/api/json/v1/1/")
+        .client(okHttpClient)
         .addConverterFactory(MoshiConverterFactory.create(moshi))
         .build()
 
-    private val api: TheMealDBService = retrofit.create(TheMealDBService::class.java)
-    private val repository = RecipeRemoteDataSource(api)
+    private val api: MealApi = retrofit.create(MealApi::class.java)
+    private val remoteSource = RemoteSource(api)
 
-    fun searchRecipes(query: String) {
+    fun search(query: String) {
         viewModelScope.launch {
             _uiState.value = UiState.Loading
-            val result = repository.searchRecipes(query)
+            val result = remoteSource.searchRecipes(query)
             _uiState.value = result.fold(
                 onSuccess = { recipes -> UiState.Success(recipes) },
                 onFailure = { error -> UiState.Error(error.message ?: "An error occurred while fetching recipes.") }
@@ -103,22 +105,22 @@ class RecipeViewModel : androidx.lifecycle.ViewModel() {
 
 // main activity & compose ui
 class MainActivity : ComponentActivity() {
-    private val viewModel: RecipeViewModel by viewModels()
+    private val searchViewModel: SearchViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             MaterialTheme {
-                RecipeSearchScreen(viewModel = viewModel)
+                SearchScreen(viewModel = searchViewModel)
             }
         }
     }
 }
 
 @Composable
-fun RecipeSearchScreen(viewModel: RecipeViewModel) {
-    val uiState by viewModel.uiState.collectAsState()
+fun SearchScreen(viewModel: SearchViewModel) {
+    val state by viewModel.uiState.collectAsState()
     var query by remember { mutableStateOf("") }
 
     Column(
@@ -138,15 +140,13 @@ fun RecipeSearchScreen(viewModel: RecipeViewModel) {
                 label = { Text("Search Recipe") },
                 modifier = Modifier.weight(1f)
             )
-            Button(
-                onClick = { viewModel.searchRecipes(query) }
-            ) {
+            Button(onClick = { viewModel.search(query) }) {
                 Text("Search")
             }
         }
         Spacer(modifier = Modifier.height(16.dp))
 
-        when (uiState) {
+        when (state) {
             is UiState.Loading -> {
                 Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
@@ -154,17 +154,18 @@ fun RecipeSearchScreen(viewModel: RecipeViewModel) {
             }
             is UiState.Error -> {
                 Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text(text = (uiState as UiState.Error).message)
+                    Text(text = (state as UiState.Error).message)
                 }
             }
             is UiState.Success -> {
-                val recipes = (uiState as UiState.Success).recipes
-                LazyColumn(modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
+                val recipes = (state as UiState.Success).recipes
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
                 ) {
                     items(recipes) { meal ->
-                        RecipeItem(meal = meal)
+                        RecipeCard(meal = meal)
                     }
                 }
             }
@@ -178,7 +179,7 @@ fun RecipeSearchScreen(viewModel: RecipeViewModel) {
 }
 
 @Composable
-fun RecipeItem(meal: Meal) {
+fun RecipeCard(meal: Meal) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
